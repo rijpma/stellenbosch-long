@@ -1,8 +1,12 @@
 setwd("~/repos/stel-long/")
 
+library("data.table")
+library("tinyplot")
+
 gt = fread("~/data/cape/opg/GT_Training_data_030624.csv", encoding = "Latin-1")
 
-opg = fread("~/data/cape/opg/stellenbosch_long_linked_graphs.csv")
+# opg = fread("~/data/cape/opg/stellenbosch_long_linked_graphs.csv")
+opg = fread("~/data/cape/opg/stellenbosch_long_linked_wsaf_feb2026.csv.gz", na.strings = "")
 
 # opg_mtchd = fread("~/repos/capelinker/out/stellenbosch_matches_olddata_oct20model.csv")
 opg_mtchd = fread("~/repos/capelinker/out/stellenbosch_matches_olddata_nov3model.csv")
@@ -44,98 +48,79 @@ dev.off()
 # fix breaks
 
 # series length
-par(mfrow = c(2, 2))
-hist(opg[, len_o])
-hist(opg[, len])
-hist(opg[, len_e])
-hist(opg[, len_m])
+toplot = melt(opg, measure.vars = c("len", "len_ext", "len_ext_safe"), id.vars = "hhobs")
+tinyplot::plt(
+    ~ value, 
+    facet = ~ variable, 
+    data = toplot, 
+    type = "hist"
+)
 
-opg[, max_linkdist_o := diff(range(year)), by = index_o]
-opg[, max_linkdist := diff(range(year)), by = index]
-opg[, max_linkdist_e := diff(range(year)), by = index_e]
-opg[, max_linkdist_m := diff(range(year)), by = index_m]
 
-par(mfrow = c(2, 2))
-hist(opg[, max_linkdist_o])
+opg[, max_linkdist := diff(range(year)), by = hhid]
+opg[, max_linkdist_ext := diff(range(year)), by = hhid_ext]
+opg[, max_linkdist_ext_safe := diff(range(year)), by = hhid_ext_safe]
+
+par(mfrow = c(1, 3))
 hist(opg[, max_linkdist])
-hist(opg[, max_linkdist_e])
-hist(opg[, max_linkdist_m])
+hist(opg[, max_linkdist_ext])
+hist(opg[, max_linkdist_ext_safe])
 
 
 # linkage rates by approach
-opg[, mean(len_o > 1)]
 opg[, mean(len > 1)]
-opg[, mean(len_e > 1)]
-opg[, mean(len_m > 1)]
+opg[, mean(len_ext > 1)]
+opg[, mean(len_ext_safe > 1)]
 
 toplot = rbind(
-    old = opg[, .N, by = list(len = len_o)],
-    simple = opg[, .N, by = list(len = len)],
-    extend = opg[, .N, by = list(len = len_e)],
-    merge = opg[, .N, by = list(len = len_m)],
+    none = opg[, .N, by = list(len = len)],
+    extend = opg[, .N, by = list(len = len_ext)],
+    extend_safe = opg[, .N, by = list(len = len_ext_safe)],
     idcol = "approach"
 )
-library("tinyplot")
-pdf("out/linklengths_by_approach.pdf", height = 6)
+
+pdf("out/linklengths_by_safeapproach.pdf", height = 6)
 par(mfrow = c(1, 1))
-plt(N ~ len | approach, data = toplot[order(len)], type = "b", pch = 20, xlim = c(1, 100), log = "y")
+plt(N ~ len | approach, data = toplot[order(len)], type = "b", pch = 20,  log = "y")
 grid()
 dev.off()
 
-plt(N ~ len | approach, data = toplot[order(len)][approach %in% c("old", "simple")], type = "b", pch = 20, log = "y")
-abline(v = 2)
-plt(N ~ len | approach, data = toplot[order(len)], type = "b", pch = 20, xlim = c(1, 150))
-plt(N ~ len | approach, data = toplot[order(len)], type = "b", pch = 20, log = "xy")
-plot(opg[!is.na(index_m), .N, by = list(len = len_m)])
+# plot same given linked at all (ie remove N = 1)
+toplot = melt(opg[len > 1], measure.vars = c("len", "len_ext", "len_ext_safe"), id.vars = "hhobs")
+toplot = toplot[, .N, by = list(len = value, approach = variable)]
+plt(N ~ len, facet = ~ approach, data = toplot)
 
-par(mfrow = c(2, 2))
-plot(opg[len > 1, .N, by = list(len = len_o)])
-plot(opg[len > 1, .N, by = list(len = len)])
-plot(opg[len > 1, .N, by = list(len = len_e)])
-plot(opg[len > 1, .N, by = list(len = len_m)])
 
 # linkage rates over time
 toplot = rbind(
-    old = opg[, mean(len_o > 1), by = year],
-    simple = opg[, mean(len > 1), by = year],
-    extend = opg[, mean(len_e > 1), by = year],
-    merge = opg[, mean(len_m > 1), by = year],
+    none = opg[, mean(len > 1), by = year],
+    extend = opg[, mean(len_ext > 1), by = year],
+    extend_safe = opg[, mean(len_ext_safe > 1), by = year],
     idcol = "approach"
 )
-plt(V1 ~ year | approach, data = toplot, type = "l")
-
-pdf("out/linkrates_by_approach.pdf")
-par(mfrow = c(2, 2))
-plot(opg[, mean(len_o > 1), by = year][order(year)], 
-    main = "old",
-    type = "b", pch = 20, ylim = c(0, 1))
-plot(opg[, mean(len > 1), by = year][order(year)], 
-    main = "simple",
-    type = "b", pch = 20, ylim = c(0, 1))
-plot(opg[, mean(len_e > 1), by = year][order(year)], 
-    main = "extend",
-    type = "b", pch = 20, ylim = c(0, 1))
-plot(opg[, mean(len_m > 1), by = year][order(year)], 
-    main = "merge",
-    type = "b", pch = 20, ylim = c(0, 1))
+pdf("out/linkrates_by_safeapproach.pdf", heig = 6)
+plt(V1 ~ year | approach, data = toplot, type = "l", lwd = 1.5)
 dev.off()
 
-pdf("out/medianlinklength_by_approach.pdf")
-par(mfrow = c(2, 2))
-plot(opg[, median(len_o), by = year][order(year)], 
-    main = "old",
-    ylim = c(0, 60),
-    type = "b", pch = 20)
-plot(opg[, median(len), by = year][order(year)], 
-    main = "simple",
-    ylim = c(0, 60),
-    type = "b", pch = 20)
-plot(opg[, median(len_e), by = year][order(year)], 
-    main = "extend",
-    ylim = c(0, 60),
-    type = "b", pch = 20)
-plot(opg[, median(len_m), by = year][order(year)], 
-    main = "merge",
-    ylim = c(0, 60),
-    type = "b", pch = 20)
+# saf linked rates over time
+opg[, wifepresent := !(is.na(names_women_clean) | names_women_clean == "")]
+toplot = cube(
+    opg,
+    mean(!is.na(couple_id)),
+    by = c("year", "wifepresent")
+)
+toplot[, couple := fcase(
+    is.na(wifepresent), "all",
+    wifepresent == TRUE, "yes",
+    wifepresent == FALSE, "no"
+)]
+toplot[is.na(wifepresent)]
+
+pdf("out/linkrates_by_saf.pdf", height = 5)
+plt(V1 ~ year, facet = ~ couple, 
+    data = toplot[couple != "no"],
+    type = "b", 
+    pch = 20, 
+    col = 2
+)
 dev.off()
