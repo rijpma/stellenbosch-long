@@ -1,242 +1,239 @@
+rm(list = ls())
+
 setwd("~/repos/stel-long/")
 
 library("capelinker")
 library("data.table")
+library("igraph")
 
 source("extend.R")
 
-# cleanup
-# make sure that link_rows works on the old approach
-# evaluate start from best linkage year (1771) and work down
-    # shortens link length by half, gets rids of 2/3 of duplicate years
-    # maybe respecting the chronology is important
-    # maybe highest q loses some of the longest chains
+# cleaned opgaafrollen data
+opg = fread("~/data/cape/opg/stellenbosch_long_cleaned_auke_2024nov1.csv", na = "")
 
-# run simple and best on the new approach (high-q)
-# maybe try the N as well
-
-# note that
-
-# opg = fread("~/data/cape/opg/stellenbosch_long_cleaned_auke_2024oct18.csv",
-#     na.string = "")
-opg = fread("~/data/cape/opg/stellenbosch_long_cleaned_auke_2024nov1.csv")
-# opg = opg[persid %in% c(685,1004,1005,1243,1684,2027,2194,2268,2711,2842,3099,3143,3674,4235,4525,4978,5227,5518)][order(-year)]
-# opg = opg[persid %in% c(117266,119044,121076,123004,124510,126378,127692,128701,129057,130184,131985,133152,137127,139384,140475)][order(-year)]
-# opg = opg[persid %in% c(5929,2130,5300,4614,4362,4058,5907,2131,4945,3762,3214,2958,2390,7251,6854,3495,6219,3172,3496,8372,6218,8776,5591,6576)]
-
-opgm = fread("~/data/cape/opg/stellenbosch_long_linked_graphs.csv")
-opgm = opgm[between(len_g, 5, 100)]
-set.seed(123321)
-clusters_to_sample = opgm[, sample(cluster, 1), by = len_g]$V1
-# clusters_to_sample = 68605
-persids_to_sample = opgm[cluster %in% clusters_to_sample, persid]
-opgm = opgm[cluster %in% clusters_to_sample]
-
-opg = merge(
-    opg,
-    opgm[, list(persid, cluster, len_g)],
-    by = "persid",
-    all = FALSE
-)
-
-opg[opg == ""] = NA
-# opg = fread("example140877.csv",
-#     na.string = "")
-# opg[opg == ""] = NA
-opg_unlinked = copy(opg)
-
-# opg_mtchd = fread("~/repos/capelinker/out/stellenbosch_matches_olddata_oct20model.csv")
-# opg_mtchd = fread("~/repos/capelinker/out/stellenbosch_matches_olddata_oct20model.csv")
+# read in matches, to be made into list and list of graphs below
 opg_mtchd = fread("~/repos/capelinker/out/stellenbosch_matches_olddata_nov3model.csv")
 
-opg_mtchd = opg_mtchd[persid_from %in% persids_to_sample | persid_to %in% persids_to_sample]
+# identify all distinct subgraphs to
+# 1 check results
+# 2 be able to id duplicate years
+# 3 check how close the linked household is to all possible links
+tograph = opg_mtchd[persid_from != persid_to, list(persid_from, persid_to)]
 
-mtchlist = split(opg_mtchd[order(-year_from), list(year_from, persid_from, year_to, persid_to, predicted)], by = "year_from")
-# if we want to sort by quality of year, do this
-lengths = sapply(mtchlist, function(x) x[, sum(predicted, na.rm = TRUE) + 1, by = persid_from][, mean(V1)])
-# or(lengths)
-mtchlist = mtchlist[order(lengths)]
+# needs ids to be character
+tograph = tograph[, lapply(.SD, as.character)]
 
-# if sort by quality of persid_from, do this
-opg_mtchd[, quality := sum(predicted, na.rm = TRUE) + 1, by = persid_from]
-opg_mtchd[, len := .N, by = persid_from]
-opg_mtchd[order(-quality), list(persid_from, quality, len)] |> unique()
-mtchlist = split(opg_mtchd[order(-quality, persid_from), list(year_from, persid_from, year_to, persid_to, predicted)], by = "persid_from")
-mtchlist[1]
-mtchlist[length(mtchlist)]
-length(mtchlist)
+g = igraph::graph_from_edgelist(as.matrix(tograph[, list(persid_from, persid_to)]))
+subgraphs = igraph::decompose(g)
 
+# get persids from nodes (vertices)
+l = lapply(subgraphs, \(x) names(V(x)))
+
+# take biggest persid as name of each subgraph
+names(l) = sapply(l, \(g) max(as.numeric(g)))
+
+# create data.table with subgraphs and persids
+l = lapply(l, as.data.table)
+subgraphs = rbindlist(l, idcol = "subgraph")
+subgraphs[, subgraph := as.integer(subgraph)]
+subgraphs[, V1 := as.integer(V1)]
+
+# merge back into opg
+dim(opg)
+opg = merge(
+    opg,
+    subgraphs,
+    by.x = "persid",
+    by.y = "V1",
+    all.x = TRUE)
+dim(opg)
+
+# length one should also have a subgraph id
+opg[is.na(subgraph), subgraph := persid]
+
+# get subgraph sizes
+opg[, len_g := .N, by = subgraph]
+
+# sample subset to check
+set.seed(321)
+subgraphs_to_check = opg[between(len_g, 10, 100) & len_g %% 5 == 0][, sample(subgraph, 1), by = len_g][, V1]
+
+check = TRUE
+if (check){
+    # subgraphs_to_check = 84573
+    persids_to_check = opg[subgraph %in% subgraphs_to_check, persid]
+
+    opg_mtchd = opg_mtchd[persid_from %in% persids_to_check | persid_to %in% persids_to_check]
+    opg = opg[persid %in% persids_to_check]
+}
+
+# keep a copy without links to insert different link strategies in
+opg_nolinks = copy(opg)
+
+# split the giant table into a matchlist depending on strategy
+
+strategy = "best links first"
+# strategy = "start from end"
+
+if (strategy == "start from end"){
+    mtchlist = split(opg_mtchd[order(-year_from), list(year_from, persid_from, year_to, persid_to, predicted)], by = "year_from")
+}
+
+if (strategy == "best links first"){
+    opg_mtchd[, quality := sum(predicted, na.rm = TRUE) + 1, by = persid_from]
+    opg_mtchd[, len := .N, by = persid_from]
+    opg_mtchd[order(-quality), list(persid_from, quality, len)] |> unique()
+    mtchlist = split(opg_mtchd[order(-quality, persid_from), list(year_from, persid_from, year_to, persid_to, predicted)], by = "persid_from")
+}
+
+opg[, duplicated_years := duplicated(year) | duplicated(year, fromLast = TRUE), by = subgraph]
+
+
+# lists to fill with variables to reinsert later
 fromplist = list()
 fromylist = list()
 indexlist = list()
 problist = list()
-approach = "extend_new"
-approach = "simple"
-approach = "extend_best"
-# for (approach in c("old", "simple", "extend", "extend_best", "extend_nodup", "merge")){
-for (approach in c("simple", "extend_best")){
-# for (approach in c("extend_best")){
 
-    # roll out over opgaafrollen
-    # expand index
+# loop over approaches
+approaches = c("simple", "extend_best", "extend_nodup")
+# approaches = c("extend_nodup")
+for (approach in approaches){
+
+    # link_rows needs an index variable to identify unassigned blocks, so create here
+    opg[, index := NA_integer_]
+
+    for (i in 1:length(mtchlist)){
+    # for (i in 1:15){
+        link_rows(opg, matches = mtchlist[[i]], approach = approach)
+        cat(i, " - ")
+        # print(opg[!is.na(index), any(duplicated(year))])
+    }
+
+    indexlist[[approach]] = opg$index
+    fromylist[[approach]] = opg$fromyear
+    fromplist[[approach]] = opg$score
+    problist[[approach]] = opg$score
+
+
+    # make sure variables are not filled from previous iterations
     opg[, index := NULL]
     opg[, score := NULL]
-    opg[, index2 := NULL]
     opg[, index_candidate := NULL]
     opg[, fromyear := NULL]
     opg[, frompersid := NULL]
 
+    gc()
 
-    # first set of matches
-    # I'm not sure why this isn't just in the loop?
-    # reorder dat to match the order in mtchlist[[1]], then set index to persid
-    opg[match(mtchlist[[1]]$persid_to, persid), index := mtchlist[[1]]$persid_from]
-
-    # this added the relevant prediction score
-    # dat[match(mtchlist[[1]]$persid_to, persid), pred := mtchlist[[1]]$pred]
-    # add origin year and persid for bookkeeping
-    # NB used to this, but match() doesn't work this way
-    # opg[match(mtchlist[[1]]$persid_to, persid), fromyear := names(mtchlist)[1]]
-    # opg[match(mtchlist[[1]]$persid_to, persid), frompersid := index]
-    opg[!is.na(index), fromyear := names(mtchlist)[1]] # UPDATE
-    opg[!is.na(index), frompersid := index]
-
-    # first index fill from 1844
-    # opg[year==1844, index := persid]
-
-    # this order is probably not best
-    # Not sure why this is here anymore (well we obviously want unlinked individuals to have an index, but why it's hardcoded to be 1844?)
-
-
-    # loop over remaining years
-    i = 2
-    i = 3
-    i = 4
-    i = 5
-    for (i in 2:length(mtchlist)){
-    # for (i in 2:4){
-    #     t0 = Sys.time()
-
-    # for (i in 2:10e3){
-    # for (i in 2:7){
-        # cat("Indexed: ", sum(!is.na(opg$index)), '-- ')
-        # fwrite(data.table(step = i, 
-        #                 total = sum(!is.na(opg$index)),
-        #                 fromyear = unique(mtchlist[[i]]$year_from)
-        #             ),
-        #  "~/repos/stel-long/out/test.csv", append = TRUE)
-        opg[, index_candidate := as.integer(NA)]
-        opg[match(mtchlist[[i]]$persid_to, persid), index_candidate := mtchlist[[i]]$persid_from]
-        opg[match(mtchlist[[i]]$persid_to, persid), score_candidate := mtchlist[[i]]$predicted]
-
-        # dat[, index_candidate := mtchlist[[i]][, persid[match(dat[, persid_from], mtchlist[[i]][, persid_to])]]]
-        # also add the necessary persid somehow...
-
-        # don't overwrite links already made
-        opg[!is.na(index), index_candidate := NA]
-
-        # dat$index_candidate = mtchlist[[i]]$persid[match(dat$persid, mtchlist[[i]]$persid.1)]
-
-        # variant 1: just the new links
-        # variant 2: extend, don't merge
-        # variant 3: extend and merge
-        if (approach == "old"){
-            capelinker::expand_index(opg)
-        } else {
-            link_rows(opg, approach = approach)
-        }
-
-        # cat("total number of bridges:", sum(opg$bridge, na.rm = TRUE), "\n")
-
-        opg[index %in% persid & is.na(frompersid), fromyear := names(mtchlist)[i]]
-        opg[index %in% persid & is.na(frompersid), frompersid := index]
-
-        # opg[, list(year, persid, names_men_clean, names_women_clean, index, score, fromyear, frompersid)][order(-year)] |>
-            # knitr::kable()
-        # i = i + 1
-        cat(i, " - ")
-
-    }
-    # t1 = Sys.time()
-    # (t1 - t0) * 10
-    indexlist[[approach]] = opg$index
-    fromylist[[approach]] = opg$fromyear
-    fromplist[[approach]] = opg$frompersid
-    problist[[approach]] = opg$frompersid
 }
-length(indexlist)
 
-opg_unlinked$index = indexlist[["simple"]]
-opg_unlinked$fromyear = fromylist[["simple"]]
-opg_unlinked$frompersid = fromplist[["simple"]]
+opg_nolinks$index = indexlist[["simple"]]
+opg_nolinks$fromyear = fromylist[["simple"]]
+opg_nolinks$frompersid = fromplist[["simple"]]
+opg_nolinks$score = problist[["simple"]]
 
-opg_unlinked$index_b = indexlist[["extend_best"]]
-opg_unlinked$fromyear_b = fromylist[["extend_best"]]
-opg_unlinked$frompersid_b = fromplist[["extend_best"]]
+opg_nolinks$index_b = indexlist[["extend_best"]]
+opg_nolinks$fromyear_b = fromylist[["extend_best"]]
+opg_nolinks$frompersid_b = fromplist[["extend_best"]]
+opg_nolinks$score_b = problist[["extend_best"]]
 
-opg_unlinked[is.na(index), index := persid]
-opg_unlinked[is.na(index_b), index_b := persid]
+opg_nolinks$index_n = indexlist[["extend_nodup"]]
+opg_nolinks$fromyear_n = fromylist[["extend_nodup"]]
+opg_nolinks$frompersid_n = fromplist[["extend_nodup"]]
+opg_nolinks$score_n = problist[["extend_nodup"]]
 
-opg_unlinked[, len := .N, by = index]
-opg_unlinked[, len_b := .N, by = index_b]
+opg_nolinks[is.na(index), index := persid]
+opg_nolinks[is.na(index_b), index_b := persid]
+opg_nolinks[is.na(index_n), index_n := persid]
 
-opg_unlinked[, mean(len)]
-opg_unlinked[, mean(len_b)]
+opg_nolinks[, len := .N, by = index]
+opg_nolinks[, len_b := .N, by = index_b]
+opg_nolinks[, len_n := .N, by = index_n]
 
-opg_unlinked[, sum(duplicated(year)), by = index][, summary(V1)]
-opg_unlinked[, sum(duplicated(year)), by = index_b][, summary(V1)]
+opg_nolinks[, mean(len)]
+opg_nolinks[, mean(len_b)]
+opg_nolinks[, mean(len_n)]
 
-all(opg_unlinked$persid == opg$persid)
-all(opg_unlinked$persid == opg_mtchd$persid)
+opg_nolinks[, sum(duplicated(year)), by = index][, summary(V1)]
+opg_nolinks[, sum(duplicated(year)), by = index_b][, summary(V1)]
+opg_nolinks[, sum(duplicated(year)), by = index_n][, summary(V1)]
 
-# d = opg_unlinked[len_g == 40]
-# m = as.matrix(d[, lapply(list(frompersid, persid), as.character)])
-# g = graph_from_edgelist(na.omit(m))
-# plot(g)
+fwrite(opg_nolinks, "~/data/cape/opg/stellenbosch_long_linked_bfirst_apr2025.csv")
 
-counts = opg_unlinked[, list(all(index_b == index), unique(len_g)), by = cluster]
-clusters_to_check = counts[V1 == FALSE][order(V2)][V2 %% 5 == 0, cluster]
+opg_nolinks = fread("~/data/cape/opg/stellenbosch_long_linked_bfirst_apr2025.csv")
 
-# all the corresponding graphs
+
+opg_tocheck = opg_nolinks[subgraph %in% subgraphs_to_check]
+# currently this works because all the other clusters are NA
+
+# viz the graphs
+# remake for now
 tograph = opg_mtchd[persid_from != persid_to, list(persid_from, persid_to)]
+
+# need ids to be character
 tograph = tograph[, lapply(.SD, as.character)]
 
-library("igraph")
-x = graph_from_edgelist(as.matrix(tograph[, list(persid_from, persid_to)]))
+g = graph_from_edgelist(as.matrix(tograph[, list(persid_from, persid_to)]))
+subgraphs = decompose(g)
 
 # add clusters
-clusters = opg_unlinked[match(names(V(x)), as.character(opg_unlinked$persid)), cluster]
-V(x)$cluster = clusters
+clusters = opg_tocheck[match(names(V(g)), as.character(opg_tocheck$persid)), subgraph]
+V(g)$cluster = clusters
 
 # add couple names
-couples_sorted = opg_unlinked[match(names(V(x)), as.character(opg_unlinked$persid)), paste0(toupper(minitials), mlast, "-", toupper(winitials), wlast)]
-V(x)$couple = couples_sorted
+couples_sorted = opg_tocheck[match(names(V(g)), as.character(opg_tocheck$persid)), paste0(toupper(minitials), mlast, "-", toupper(winitials), wlast)]
+V(g)$couple = couples_sorted
 
 # add index
-index = opg_unlinked[match(names(V(x)), as.character(opg_unlinked$persid)), as.character(index)]
-V(x)$index = index
+index = opg_tocheck[match(names(V(g)), as.character(opg_tocheck$persid)), as.character(index)]
+V(g)$index = index
 
 # add index_b
-index_b = opg_unlinked[match(names(V(x)), as.character(opg_unlinked$persid)), as.character(index_b)]
-V(x)$index_b = index_b
+index_b = opg_tocheck[match(names(V(g)), as.character(opg_tocheck$persid)), as.character(index_b)]
+V(g)$index_b = index_b
+
+# add index_n
+index_n = opg_tocheck[match(names(V(g)), as.character(opg_tocheck$persid)), as.character(index_n)]
+V(g)$index_n = index_n
 
 # add year of couple
-years = opg_unlinked[match(names(V(x)), as.character(opg_unlinked$persid)), year]
-V(x)$year = years
+years = opg_tocheck[match(names(V(g)), as.character(opg_tocheck$persid)), year]
+V(g)$year = years
+
 
 # add edge strength
-E(x)$weight = opg_mtchd[persid_from != persid_to, predicted]
+scores = opg_mtchd[persid_from != persid_to][match(attr(E(g), "vnames") , paste0(persid_from, "|", persid_to)), predicted]
+E(g)$score = scores
+E(g)$weight = scores
+is_weighted(g)
 
-V(x)$cluster
+plot(gu)
+gu = as_undirected(g)
+summary(gu)
+ldc = cluster_leiden(gu, resolution = 0.2)
+# plot(ldc, gu)
 
-subgraphs = decompose(x)
+# communities(ldc)
+
+leiden = ldc$membership[match(names(V(g)), ldc$names)]
+V(g)$leiden = leiden
+
+subgraphs = decompose(g)
 subgraphs = subgraphs[order(sapply(subgraphs, length))]
 
-tocheck = sapply(subgraphs, \(g) all(V(g)$cluster %in% clusters_to_check))
+tocheck = sapply(subgraphs, \(g) all(V(g)$cluster %in% subgraphs_to_check))
 subgraphs = subgraphs[tocheck]
 
+tomerge = data.table(index_l = ldc$membership, persid = as.integer(ldc$names))
+opg_tocheck = merge(
+    opg_tocheck,
+    tomerge,
+    by = "persid"
+)
+opg_tocheck[, len_l := .N, by = index_l]
+
 pdf("./out/reconstruction_examples.pdf", width = 12, height = 12)
-par(mfrow = c(1, 2))
+par(mfrow = c(2, 2))
 for (subgraph in subgraphs){
 
     tree_crds = layout_as_tree(subgraph)
@@ -254,14 +251,16 @@ for (subgraph in subgraphs){
     print(resize)
 
 
-    for (ind in c("index", "index_b")){
+    for (ind in c("index", "index_b", "index_n", "leiden")){
         col = as.factor(vertex_attr(subgraph, ind))
         plot(subgraph,
             main = paste(cluster, ind),
-            vertex.color = col, 
+            vertex.color = col,
+            arrow.size = 0.5,
             layout = tree_crds,
             vertex.label = lbls,
             vertex.label.cex = resize,
+            edge.width = E(subgraph)$weight * 2
             # vertex.size = degree(subgraph)
         )
         ny = diff(range(V(subgraph)$year)) + 1
@@ -270,103 +269,20 @@ for (subgraph in subgraphs){
 }
 dev.off()
 
-# out = opg_unlinked[cluster %in% clusters_to_check]
-# out = out[order(len_g, -year, index_b, index), list(cluster, len_g, persid, year, index_b, frompersid_b, index, frompersid, add_info, names_men_clean, names_women_clean)]
+out = opg_tocheck[subgraph %in% subgraphs_to_check]
+out = out[order(len_g, -year, index_b, index),
+    list(cluster, len_g, persid, year,
+        index_b, frompersid_b,
+        index_n, frompersid_n,
+        index_l, frompersid_l = NA,
+        index, frompersid,
+        add_info,
+        names_men_clean, names_women_clean)]
 
-# out = out[, rbind(.SD, NA, fill = TRUE), by = cluster]
-# fwrite(out, "out/compare96_simple_best.csv")
-# writexl::write_xlsx(out, "out/compare96_simple_best.xlsx")
+out = out[, rbind(.SD, NA, fill = TRUE), by = cluster]
+fwrite(out, "out/compare96_simple_best.csv")
+writexl::write_xlsx(out, "out/compare96_simple_best.xlsx")
 
-opg[!is.na(index)]
-optimistic = opg_mtchd[, list(len = unique(len)), by = persid_from][, .N, by = len]
-plot(optimistic, log = "xy")
-reality = opg[!is.na(index), list(len = .N), by = index][, .N, by = len]
-points(N ~ len, data = reality, col = 2)
-
-
-
-opg_unlinked$index_o = indexlist[["old"]]
-opg_unlinked$index_e = indexlist[["extend"]]
-opg_unlinked$index_nd = indexlist[["extend_nodup"]]
-opg_unlinked$index_m = indexlist[["merge"]]
-
-opg_unlinked$fromyear_o = fromylist[["old"]]
-opg_unlinked$fromyear_e = fromylist[["extend"]]
-opg_unlinked$fromyear_nd = fromylist[["extend_nodup"]]
-opg_unlinked$fromyear_m = fromylist[["merge"]]
-
-opg_unlinked$frompersid_o = fromplist[["old"]]
-opg_unlinked$frompersid_e = fromplist[["extend"]]
-opg_unlinked$frompersid_nd = fromplist[["extend_nodup"]]
-opg_unlinked$frompersid_m = fromplist[["merge"]]
-
-# this enforces the no duplicate year extending rule (but still allows it as a start-off point, if you want to avoid that you need the graph solution and code it into link_rows)
-opg_unlinked[order(-year, -fromyear_nd), dupl_year := duplicated(year), by = index_nd]
-opg_unlinked[dupl_year == TRUE, index_nd := persid]
-opg_unlinked[dupl_year == TRUE, fromyear_nd := NA]
-opg_unlinked[dupl_year == TRUE, frompersid_nd := NA]
-
-opg_unlinked[is.na(index_o), index_o := persid]
-opg_unlinked[is.na(index_e), index_e := persid]
-opg_unlinked[is.na(index_nd), index_nd := persid]
-opg_unlinked[is.na(index_m), index_m := persid]
-
-opg_unlinked[, len_o := .N, by = index_o]
-opg_unlinked[, len_e := .N, by = index_e]
-opg_unlinked[, len_nd := .N, by = index_nd]
-opg_unlinked[, len_m := .N, by = index_m]
-
-opg_unlinked[, mean(len_e)]
-opg_unlinked[, mean(len_nd)]
-opg_unlinked[, mean(len_m)]
-
-opg_unlinked[, sum(duplicated(year)), by = index_e][, summary(V1)]
-opg_unlinked[, sum(duplicated(year)), by = index_nd][, summary(V1)]
-
-opg_unlinked[, sum(duplicated(year)), by = index_e][, mean(V1 > 0)]
-
-# ok clearly nd is not working atm, so let's find an example
-# see notes in extend, this is very hard w/o doing graph first
-# you could also put a link counter in there and just nix the latest
-# or just use fromyear?
-
-# > opg_unlinked[, mean(len)]
-# [1] 9.612637
-# > opg_unlinked[, mean(len_e)]
-# [1] 27.15415
-# > opg_unlinked[, mean(len_b)]
-# [1] 22.88712
-# > opg_unlinked[, mean(len_nd)]
-# [1] 23.00623
-# > opg_unlinked[, mean(len_m)]
-# [1] 49.92295
-# > opg_unlinked[, sum(duplicated(year)), by = index][, summary(V1)]
-#    Min. 1st Qu.  Median    Mean 3rd Qu.    Max. 
-#       0       0       0       0       0       0 
-# > opg_unlinked[, sum(duplicated(year)), by = index_e][, summary(V1)]
-#    Min. 1st Qu.  Median    Mean 3rd Qu.    Max. 
-#  0.0000  0.0000  0.0000  0.1187  0.0000 93.0000 
-# > opg_unlinked[, sum(duplicated(year)), by = index_b][, summary(V1)]
-#      Min.   1st Qu.    Median      Mean   3rd Qu.      Max. 
-# 0.0000000 0.0000000 0.0000000 0.0002497 0.0000000 1.0000000 
-# > opg_unlinked[, sum(duplicated(year)), by = index_nd][, summary(V1)]
-#    Min. 1st Qu.  Median    Mean 3rd Qu.    Max. 
-#       0       0       0       0       0       0 
-
-
-
-opg_unlinked[, dupl := duplicated(year), by = index_nd]
-opg_unlinked[index_m %in% index_m[dupl == TRUE], .N, by = index_m][N == 10]
-opg_unlinked[dupl == TRUE, .N, by = index_en][N == 2]
-opg_unlinked[index_m == 8776][order(year), list(year, persid, dupl, index_nd, index_m)]
-
-opg_unlinked[index_nd == 7251][order(year), list(year, persid, dupl, index_nd, index_e, index_m, fromyear_nd, fromyear_e)][order(-year)]
-
-
-opg_unlinked[index_en == 5518]
-opg_unlinked[index_m == 140475]
-opg_unlinked[index_m == 140475, persid]
-opg_unlinked[index_m == 140475, cat(persid, sep = ",")]
-opg_unlinked[index]
-# fwrite(opg_unlinked, "~/data/cape/opg/stellenbosch_long_linked.csv")
-fwrite(opg_unlinked, "~/data/cape/opg/stellenbosch_long_linked_fixextend.csv")
+# 84573 is allowing duplicate year linkage
+# 92259 is making a link chain longer than the biggest one
+opg_tocheck[subgraph == 84573, list(year, duplicated(year), index)]
