@@ -47,7 +47,8 @@ dev.off()
 # + gt
 # fix breaks
 
-# series length
+# series length, not cumul
+pdf("out/linklength_nocumul.pdf", height = 5)
 toplot = melt(opg, measure.vars = c("len", "len_ext", "len_ext_safe"), id.vars = "hhobs")
 tinyplot::plt(
     ~ value, 
@@ -55,7 +56,7 @@ tinyplot::plt(
     data = toplot, 
     type = "hist"
 )
-
+dev.off()
 
 opg[, max_linkdist := diff(range(year)), by = hhid]
 opg[, max_linkdist_ext := diff(range(year)), by = hhid_ext]
